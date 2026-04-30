@@ -85,6 +85,11 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
         self
     }
 
+    pub fn with_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
     /// Spawn the background animation thread and return a handle.
     ///
     /// When the output is not a TTY, no background thread is spawned and
