@@ -138,6 +138,7 @@
 //!   output is piped or redirected
 //! - Clean shutdown via [`Drop`] — no thread leaks if you forget to stop
 
+mod symbol;
 mod multi;
 mod shared;
 mod spinner;

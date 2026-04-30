@@ -1,28 +1,33 @@
+use crate::symbol::Symbol;
+
 // ANSI escape codes
-pub(crate) const GREEN: &str = "\x1b[32m";
-pub(crate) const RED: &str = "\x1b[31m";
-pub(crate) const YELLOW: &str = "\x1b[33m";
-pub(crate) const BLUE: &str = "\x1b[34m";
 pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const CLEAR_LINE: &str = "\x1b[2K";
 
 // Default spinner character set (Braille dots)
-pub(crate) const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+pub(crate) const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(crate) const DEFAULT_FINISH: &str = "⠿";
 
-pub(crate) fn format_frame(frame_char: char, message: &str) -> String {
+pub(crate) fn format_frame(frame_char: &str, message: &str) -> String {
     format!("\r{CLEAR_LINE}{frame_char} {message}")
 }
 
-pub(crate) fn format_finalize(symbol: &str, color: &str, message: &str) -> String {
-    format!("\r{CLEAR_LINE}{color}{symbol}{RESET} {message}\n")
+pub(crate) fn format_finalize(symbol: impl Symbol, message: &str) -> String {
+    format!(
+        "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {message}\n",
+        ascii_color = symbol.color().as_deref().unwrap_or(""),
+        symbol = symbol.symbol()
+    )
 }
 
-pub(crate) fn format_finalize_plain(symbol: &str, message: &str) -> String {
-    format!("{symbol} {message}\n")
+pub(crate) fn format_finalize_plain(symbol: impl AsRef<str>, message: &str) -> String {
+    format!("{symbol} {message}\n", symbol = symbol.as_ref())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::symbol::AsciiColor;
+
     use super::*;
     use proptest::prelude::*;
     use std::io;
@@ -55,12 +60,12 @@ pub(crate) mod tests {
 
     #[test]
     fn test_yellow_constant() {
-        assert_eq!(YELLOW, "\x1b[33m");
+        assert_eq!(&AsciiColor::Yellow.to_ansi_code(), "\x1b[33m");
     }
 
     #[test]
     fn test_blue_constant() {
-        assert_eq!(BLUE, "\x1b[34m");
+        assert_eq!(&AsciiColor::Blue.to_ansi_code(), "\x1b[34m");
     }
 
     proptest! {
@@ -75,17 +80,17 @@ pub(crate) mod tests {
         #[test]
         fn property_format_finalize_all_variants(msg in ".*") {
             // TTY mode — all 4 symbols with exact string equality
-            let success_tty = format_finalize("✔", GREEN, &msg);
-            prop_assert_eq!(success_tty, format!("\r{CLEAR_LINE}{GREEN}✔{RESET} {msg}\n"));
+            let success_tty = format_finalize(("✔", AsciiColor::Green), &msg);
+            prop_assert_eq!(success_tty, format!("\r{CLEAR_LINE}{green}✔{RESET} {msg}\n", green = AsciiColor::Green.to_ansi_code()));
 
-            let fail_tty = format_finalize("✖", RED, &msg);
-            prop_assert_eq!(fail_tty, format!("\r{CLEAR_LINE}{RED}✖{RESET} {msg}\n"));
+            let fail_tty = format_finalize(("✖", AsciiColor::Red), &msg);
+            prop_assert_eq!(fail_tty, format!("\r{CLEAR_LINE}{red}✖{RESET} {msg}\n", red = AsciiColor::Red.to_ansi_code()));
 
-            let warn_tty = format_finalize("⚠", YELLOW, &msg);
-            prop_assert_eq!(warn_tty, format!("\r{CLEAR_LINE}{YELLOW}⚠{RESET} {msg}\n"));
+            let warn_tty = format_finalize(("⚠", AsciiColor::Yellow), &msg);
+            prop_assert_eq!(warn_tty, format!("\r{CLEAR_LINE}{yellow}⚠{RESET} {msg}\n", yellow = AsciiColor::Yellow.to_ansi_code()));
 
-            let info_tty = format_finalize("ℹ", BLUE, &msg);
-            prop_assert_eq!(info_tty, format!("\r{CLEAR_LINE}{BLUE}ℹ{RESET} {msg}\n"));
+            let info_tty = format_finalize(("ℹ", AsciiColor::Blue), &msg);
+            prop_assert_eq!(info_tty, format!("\r{CLEAR_LINE}{blue}ℹ{RESET} {msg}\n", blue = AsciiColor::Blue.to_ansi_code()));
 
             // Plain mode — all 4 symbols with exact string equality
             prop_assert_eq!(format_finalize_plain("✔", &msg), format!("✔ {msg}\n"));

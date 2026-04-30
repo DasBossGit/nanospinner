@@ -6,9 +6,11 @@ use std::time::Duration;
 
 #[cfg(test)]
 use crate::shared::RESET;
-use crate::shared::{
-    format_finalize, format_finalize_plain, format_frame, BLUE, CLEAR_LINE, FRAMES, GREEN, RED,
-    YELLOW,
+use crate::{
+    shared::{
+        format_finalize, format_finalize_plain, format_frame, CLEAR_LINE, DEFAULT_FINISH, FRAMES,
+    },
+    symbol::{AsciiColor, Symbol},
 };
 
 /// A builder for configuring and starting a terminal spinner.
@@ -18,7 +20,8 @@ use crate::shared::{
 /// [`Spinner::start`] to begin the animation and get a [`SpinnerHandle`].
 pub struct Spinner<W: io::Write + Send + 'static = io::Stdout> {
     message: String,
-    frames: Vec<char>,
+    frames: Box<[&'static str]>,
+    finish: Box<dyn Symbol + Send>,
     interval: Duration,
     writer: W,
     is_tty: bool,
@@ -34,7 +37,8 @@ impl Spinner {
     pub fn new(message: impl Into<String>) -> Spinner<io::Stdout> {
         Spinner {
             message: message.into(),
-            frames: FRAMES.to_vec(),
+            frames: FRAMES.into(),
+            finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
             interval: Duration::from_millis(80),
             is_tty: io::stdout().is_terminal(),
             writer: io::stdout(),
@@ -50,7 +54,8 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
     pub fn with_writer(message: impl Into<String>, writer: W) -> Self {
         Spinner {
             message: message.into(),
-            frames: FRAMES.to_vec(),
+            frames: FRAMES.into(),
+            finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
             interval: Duration::from_millis(80),
             is_tty: false,
             writer,
@@ -62,11 +67,22 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
     pub fn with_writer_tty(message: impl Into<String>, writer: W, is_tty: bool) -> Self {
         Spinner {
             message: message.into(),
-            frames: FRAMES.to_vec(),
+            frames: FRAMES.into(),
+            finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
             interval: Duration::from_millis(80),
             is_tty,
             writer,
         }
+    }
+
+    pub fn with_frames(
+        mut self,
+        frames: impl IntoIterator<Item = &'static str>,
+        finish: impl Symbol + Send + 'static,
+    ) -> Self {
+        self.frames = frames.into_iter().collect();
+        self.finish = Box::new(finish);
+        self
     }
 
     /// Spawn the background animation thread and return a handle.
@@ -98,6 +114,7 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
         };
 
         SpinnerHandle {
+            finish: self.finish,
             stop_flag,
             message,
             writer,
@@ -114,6 +131,7 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
 /// [`SpinnerHandle::fail`]. Dropping the handle will automatically stop
 /// the background thread.
 pub struct SpinnerHandle {
+    finish: Box<dyn Symbol>,
     stop_flag: Arc<AtomicBool>,
     message: Arc<Mutex<String>>,
     writer: Arc<Mutex<Box<dyn io::Write + Send>>>,
@@ -160,9 +178,9 @@ impl SpinnerHandle {
         let msg = self.message.lock().unwrap().clone();
         self.shutdown();
         let output = if self.is_tty {
-            format_finalize("✔", GREEN, &msg)
+            format_finalize(self.finish.as_ref(), &msg)
         } else {
-            format_finalize_plain("✔", &msg)
+            format_finalize_plain(self.finish.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -177,9 +195,9 @@ impl SpinnerHandle {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
-            format_finalize("✔", GREEN, &msg)
+            format_finalize(self.finish.as_ref(), &msg)
         } else {
-            format_finalize_plain("✔", &msg)
+            format_finalize_plain(self.finish.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -190,13 +208,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn fail(self) {
+    pub fn fail(self, symbol: impl Symbol) {
         let msg = self.message.lock().unwrap().clone();
         self.shutdown();
         let output = if self.is_tty {
-            format_finalize("✖", RED, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("✖", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -207,13 +225,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn fail_with(self, message: impl Into<String>) {
+    pub fn fail_with(self, message: impl Into<String>, symbol: impl Symbol) {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
-            format_finalize("✖", RED, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("✖", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -224,13 +242,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn warn(self) {
+    pub fn warn(self, symbol: impl Symbol) {
         let msg = self.message.lock().unwrap().clone();
         self.shutdown();
         let output = if self.is_tty {
-            format_finalize("⚠", YELLOW, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("⚠", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -241,13 +259,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn warn_with(self, message: impl Into<String>) {
+    pub fn warn_with(self, message: impl Into<String>, symbol: impl Symbol) {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
-            format_finalize("⚠", YELLOW, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("⚠", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -258,13 +276,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn info(self) {
+    pub fn info(self, symbol: impl Symbol) {
         let msg = self.message.lock().unwrap().clone();
         self.shutdown();
         let output = if self.is_tty {
-            format_finalize("ℹ", BLUE, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("ℹ", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -275,13 +293,13 @@ impl SpinnerHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn info_with(self, message: impl Into<String>) {
+    pub fn info_with(self, message: impl Into<String>, symbol: impl Symbol) {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
-            format_finalize("ℹ", BLUE, &msg)
+            format_finalize(symbol, &msg)
         } else {
-            format_finalize_plain("ℹ", &msg)
+            format_finalize_plain(symbol.symbol(), &msg)
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -296,7 +314,7 @@ impl Drop for SpinnerHandle {
 }
 
 fn spin_loop(
-    frames: &[char],
+    frames: &[&str],
     interval: Duration,
     stop_flag: &Arc<AtomicBool>,
     message: &Arc<Mutex<String>>,
@@ -319,7 +337,7 @@ fn spin_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::tests::TestWriter;
+    use crate::{shared::tests::TestWriter, symbol::AsciiColor};
     use proptest::prelude::*;
 
     proptest! {
@@ -362,10 +380,10 @@ mod tests {
             let spinner = Spinner::with_writer_tty(msg.clone(), writer, true);
             let handle = spinner.start();
             thread::sleep(Duration::from_millis(100));
-            handle.fail();
+            handle.fail("✖");
 
             let output = reader.output();
-            prop_assert!(output.contains(RED), "TTY fail output must contain RED ANSI code");
+            prop_assert!(output.contains(&AsciiColor::Red.to_ansi_code()), "TTY fail output must contain RED ANSI code");
             prop_assert!(output.contains("✖"), "TTY fail output must contain ✖ symbol");
             prop_assert!(output.contains(&msg), "TTY fail output must contain the message");
             prop_assert!(output.contains(RESET), "TTY fail output must contain RESET ANSI code");
@@ -382,10 +400,10 @@ mod tests {
             let spinner = Spinner::with_writer_tty(original, writer, true);
             let handle = spinner.start();
             thread::sleep(Duration::from_millis(100));
-            handle.fail_with(replacement.clone());
+            handle.fail_with(replacement.clone(), "✖");
 
             let output = reader.output();
-            prop_assert!(output.contains(RED), "TTY fail_with output must contain RED ANSI code");
+            prop_assert!(output.contains(&AsciiColor::Red.to_ansi_code()), "TTY fail_with output must contain RED ANSI code");
             prop_assert!(output.contains("✖"), "TTY fail_with output must contain ✖ symbol");
             prop_assert!(output.contains(&replacement), "TTY fail_with output must contain the replacement message");
             prop_assert!(output.contains(RESET), "TTY fail_with output must contain RESET ANSI code");
@@ -395,9 +413,9 @@ mod tests {
 
     #[test]
     fn test_default_frames() {
-        let expected = vec!['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let expected = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let spinner = Spinner::with_writer("test", Vec::<u8>::new());
-        assert_eq!(spinner.frames, expected);
+        assert_eq!(spinner.frames.as_ref(), expected.as_slice());
     }
 
     #[test]
@@ -465,31 +483,31 @@ mod tests {
                 Box::new(|h| h.success_with("replacement1".to_string())),
             ),
             // fail — original message
-            ("✖", "msg2", "msg2", Box::new(|h| h.fail())),
+            ("✖", "msg2", "msg2", Box::new(|h| h.fail("✖"))),
             // fail — replacement message
             (
                 "✖",
                 "ignored",
                 "replacement2",
-                Box::new(|h| h.fail_with("replacement2".to_string())),
+                Box::new(|h| h.fail_with("replacement2".to_string(), "✖")),
             ),
             // warn — original message
-            ("⚠", "msg3", "msg3", Box::new(|h| h.warn())),
+            ("⚠", "msg3", "msg3", Box::new(|h| h.warn("⚠"))),
             // warn — replacement message
             (
                 "⚠",
                 "ignored",
                 "replacement3",
-                Box::new(|h| h.warn_with("replacement3".to_string())),
+                Box::new(|h| h.warn_with("replacement3".to_string(), "⚠")),
             ),
             // info — original message
-            ("ℹ", "msg4", "msg4", Box::new(|h| h.info())),
+            ("ℹ", "msg4", "msg4", Box::new(|h| h.info("ℹ"))),
             // info — replacement message
             (
                 "ℹ",
                 "ignored",
                 "replacement4",
-                Box::new(|h| h.info_with("replacement4".to_string())),
+                Box::new(|h| h.info_with("replacement4".to_string(), "ℹ")),
             ),
         ];
 
@@ -539,6 +557,9 @@ mod tests {
             "TTY output should contain ANSI escape codes"
         );
         assert!(output.contains("✔"), "TTY output should contain ✔");
-        assert!(output.contains(GREEN), "TTY output should contain GREEN");
+        assert!(
+            output.contains(&AsciiColor::Green.to_ansi_code()),
+            "TTY output should contain GREEN"
+        );
     }
 }

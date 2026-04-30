@@ -1,4 +1,5 @@
-use crate::shared::{format_finalize_plain, BLUE, CLEAR_LINE, FRAMES, GREEN, RED, RESET, YELLOW};
+use crate::shared::{format_finalize_plain, CLEAR_LINE, FRAMES, RESET};
+use crate::symbol::Symbol;
 
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -6,31 +7,58 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum LineStatus {
     /// Still animating.
     Active,
     /// Finalized with success (green ✔).
-    Succeeded,
+    Succeeded(Box<dyn Symbol + Send>),
     /// Finalized with a replacement success message.
-    SucceededWith(String),
+    SucceededWith(Box<dyn Symbol + Send>, String),
     /// Finalized with failure (red ✖).
-    Failed,
+    Failed(Box<dyn Symbol + Send>),
     /// Finalized with a replacement failure message.
-    FailedWith(String),
+    FailedWith(Box<dyn Symbol + Send>, String),
     /// Finalized with warning (yellow ⚠).
-    Warned,
+    Warned(Box<dyn Symbol + Send>),
     /// Finalized with a replacement warning message.
-    WarnedWith(String),
+    WarnedWith(Box<dyn Symbol + Send>, String),
     /// Finalized with info (blue ℹ).
-    Informed,
+    Informed(Box<dyn Symbol + Send>),
     /// Finalized with a replacement info message.
-    InformedWith(String),
+    InformedWith(Box<dyn Symbol + Send>, String),
     /// Silently dismissed — produces no output.
     Cleared,
 }
 
-#[derive(Clone)]
+impl PartialEq for LineStatus {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (LineStatus::SucceededWith(_, a), LineStatus::SucceededWith(_, b)) => a == b,
+            (LineStatus::FailedWith(_, a), LineStatus::FailedWith(_, b)) => a == b,
+            (LineStatus::WarnedWith(_, a), LineStatus::WarnedWith(_, b)) => a == b,
+            (LineStatus::InformedWith(_, a), LineStatus::InformedWith(_, b)) => a == b,
+            _ => ::core::mem::discriminant(self) == ::core::mem::discriminant(other),
+        }
+    }
+}
+
+impl ::std::fmt::Debug for LineStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match self {
+            LineStatus::Active => write!(f, "Active"),
+            LineStatus::Succeeded(_) => write!(f, "Succeeded"),
+            LineStatus::SucceededWith(_, msg) => write!(f, "SucceededWith({msg})"),
+            LineStatus::Failed(_) => write!(f, "Failed"),
+            LineStatus::FailedWith(_, msg) => write!(f, "FailedWith({msg})"),
+            LineStatus::Warned(_) => write!(f, "Warned"),
+            LineStatus::WarnedWith(_, msg) => write!(f, "WarnedWith({msg})"),
+            LineStatus::Informed(_) => write!(f, "Informed"),
+            LineStatus::InformedWith(_, msg) => write!(f, "InformedWith({msg})"),
+            LineStatus::Cleared => write!(f, "Cleared"),
+        }
+    }
+}
+
 pub(crate) struct SpinnerLine {
     pub(crate) message: String,
     pub(crate) status: LineStatus,
@@ -181,7 +209,7 @@ impl MultiSpinnerHandle {
         if !self.is_tty {
             return;
         }
-        let Ok(snapshot) = self.lines.lock().map(|g| g.clone()) else {
+        let Ok(snapshot) = self.lines.lock() else {
             return;
         };
         let visible = self.last_visible_count.load(Ordering::Relaxed);
@@ -193,45 +221,37 @@ impl MultiSpinnerHandle {
         };
         let _ = write!(w, "\x1b[{visible}A");
         let mut final_visible: usize = 0;
-        for line in &snapshot {
-            match &line.status {
-                LineStatus::Active => {
-                    let _ = write!(w, "\r{CLEAR_LINE}\n");
-                    final_visible += 1;
-                }
-                LineStatus::Succeeded => {
-                    let _ = write!(w, "\r{}{}✔{} {}\n", CLEAR_LINE, GREEN, RESET, line.message);
-                    final_visible += 1;
-                }
-                LineStatus::SucceededWith(msg) => {
-                    let _ = write!(w, "\r{CLEAR_LINE}{GREEN}✔{RESET} {msg}\n");
-                    final_visible += 1;
-                }
-                LineStatus::Failed => {
-                    let _ = write!(w, "\r{}{}✖{} {}\n", CLEAR_LINE, RED, RESET, line.message);
-                    final_visible += 1;
-                }
-                LineStatus::FailedWith(msg) => {
-                    let _ = write!(w, "\r{CLEAR_LINE}{RED}✖{RESET} {msg}\n");
-                    final_visible += 1;
-                }
-                LineStatus::Warned => {
-                    let _ = write!(w, "\r{}{}⚠{} {}\n", CLEAR_LINE, YELLOW, RESET, line.message);
-                    final_visible += 1;
-                }
-                LineStatus::WarnedWith(msg) => {
-                    let _ = write!(w, "\r{CLEAR_LINE}{YELLOW}⚠{RESET} {msg}\n");
-                    final_visible += 1;
-                }
-                LineStatus::Informed => {
-                    let _ = write!(w, "\r{}{}ℹ{} {}\n", CLEAR_LINE, BLUE, RESET, line.message);
-                    final_visible += 1;
-                }
-                LineStatus::InformedWith(msg) => {
-                    let _ = write!(w, "\r{CLEAR_LINE}{BLUE}ℹ{RESET} {msg}\n");
-                    final_visible += 1;
-                }
-                LineStatus::Cleared => { /* skip — no output */ }
+        for line in snapshot.as_slice() {
+            macro_rules! match_tree {
+                ($($pat:pat => ($symbol:expr, $msg:expr)),* $(,)?) => {
+                    match &line.status {
+                        LineStatus::Active => {
+                            let _ = write!(w, "\r{CLEAR_LINE}\n");
+                            final_visible += 1;
+                        },
+                        $(
+                            $pat => {
+                                let _ = write!(w, "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {msg}\n",
+                                    symbol = $symbol.symbol(),
+                                    ascii_color = $symbol.color().as_deref().unwrap_or(""),
+                                    msg = $msg
+                                );
+                                final_visible += 1;
+                            }
+                        ),*,
+                        LineStatus::Cleared => { /* skip — no output */ }
+                    }
+                };
+            }
+            match_tree! {
+                LineStatus::Succeeded(symbol) => (symbol, line.message),
+                LineStatus::SucceededWith(symbol, msg) => (symbol, msg),
+                LineStatus::Failed(symbol) => (symbol, line.message),
+                LineStatus::FailedWith(symbol, msg) => (symbol, msg),
+                LineStatus::Warned(symbol) => (symbol, line.message),
+                LineStatus::WarnedWith(symbol, msg) => (symbol, msg),
+                LineStatus::Informed(symbol) => (symbol, line.message),
+                LineStatus::InformedWith(symbol, msg) => (symbol, msg),
             }
         }
         for _ in 0..visible.saturating_sub(final_visible) {
@@ -271,10 +291,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn success(self) {
+    pub fn success(self, symbol: impl Symbol + Send + 'static) {
         let mut lines = self.lines.lock().unwrap();
         let message = lines[self.index].message.clone();
-        lines[self.index].status = LineStatus::Succeeded;
+        lines[self.index].status = LineStatus::Succeeded(Box::new(symbol));
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -287,10 +307,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn success_with(self, message: impl Into<String>) {
+    pub fn success_with(self, message: impl Into<String>, symbol: impl Symbol + Send + 'static) {
         let msg = message.into();
         let mut lines = self.lines.lock().unwrap();
-        lines[self.index].status = LineStatus::SucceededWith(msg.clone());
+        lines[self.index].status = LineStatus::SucceededWith(Box::new(symbol), msg.clone());
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -303,10 +323,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn fail(self) {
+    pub fn fail(self, symbol: impl Symbol + Send + 'static) {
         let mut lines = self.lines.lock().unwrap();
         let message = lines[self.index].message.clone();
-        lines[self.index].status = LineStatus::Failed;
+        lines[self.index].status = LineStatus::Failed(Box::new(symbol));
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -319,10 +339,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn fail_with(self, message: impl Into<String>) {
+    pub fn fail_with(self, message: impl Into<String>, symbol: impl Symbol + Send + 'static) {
         let msg = message.into();
         let mut lines = self.lines.lock().unwrap();
-        lines[self.index].status = LineStatus::FailedWith(msg.clone());
+        lines[self.index].status = LineStatus::FailedWith(Box::new(symbol), msg.clone());
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -335,10 +355,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn warn(self) {
+    pub fn warn(self, symbol: impl Symbol + Send + 'static) {
         let mut lines = self.lines.lock().unwrap();
         let message = lines[self.index].message.clone();
-        lines[self.index].status = LineStatus::Warned;
+        lines[self.index].status = LineStatus::Warned(Box::new(symbol));
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -351,10 +371,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn warn_with(self, message: impl Into<String>) {
+    pub fn warn_with(self, message: impl Into<String>, symbol: impl Symbol + Send + 'static) {
         let msg = message.into();
         let mut lines = self.lines.lock().unwrap();
-        lines[self.index].status = LineStatus::WarnedWith(msg.clone());
+        lines[self.index].status = LineStatus::WarnedWith(Box::new(symbol), msg.clone());
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -367,10 +387,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn info(self) {
+    pub fn info(self, symbol: impl Symbol + Send + 'static) {
         let mut lines = self.lines.lock().unwrap();
         let message = lines[self.index].message.clone();
-        lines[self.index].status = LineStatus::Informed;
+        lines[self.index].status = LineStatus::Informed(Box::new(symbol));
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -383,10 +403,10 @@ impl SpinnerLineHandle {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn info_with(self, message: impl Into<String>) {
+    pub fn info_with(self, message: impl Into<String>, symbol: impl Symbol + Send + 'static) {
         let msg = message.into();
         let mut lines = self.lines.lock().unwrap();
-        lines[self.index].status = LineStatus::InformedWith(msg.clone());
+        lines[self.index].status = LineStatus::InformedWith(Box::new(symbol), msg.clone());
         drop(lines);
         if !self.is_tty {
             let mut w = self.writer.lock().unwrap();
@@ -413,7 +433,7 @@ impl SpinnerLineHandle {
 }
 
 fn multi_spin_loop(
-    frames: &[char],
+    frames: &[&str],
     interval: Duration,
     stop_flag: &Arc<AtomicBool>,
     lines: &Arc<Mutex<Vec<SpinnerLine>>>,
@@ -425,7 +445,7 @@ fn multi_spin_loop(
 
     while !stop_flag.load(Ordering::Acquire) {
         // 1-2-3: Lock, clone state, release.
-        let snapshot = lines.lock().unwrap().clone();
+        let snapshot = lines.lock().unwrap();
 
         if !snapshot.is_empty() {
             let mut w = writer.lock().unwrap();
@@ -438,47 +458,38 @@ fn multi_spin_loop(
             // 5: Redraw each visible line.
             let frame_char = frames[frame_idx % frames.len()];
             let mut visible_count: usize = 0;
-            for line in &snapshot {
-                match &line.status {
-                    LineStatus::Active => {
-                        write!(w, "\r{}{} {}\n", CLEAR_LINE, frame_char, line.message).unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::Succeeded => {
-                        write!(w, "\r{}{}✔{} {}\n", CLEAR_LINE, GREEN, RESET, line.message)
-                            .unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::SucceededWith(msg) => {
-                        write!(w, "\r{CLEAR_LINE}{GREEN}✔{RESET} {msg}\n").unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::Failed => {
-                        write!(w, "\r{}{}✖{} {}\n", CLEAR_LINE, RED, RESET, line.message).unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::FailedWith(msg) => {
-                        write!(w, "\r{CLEAR_LINE}{RED}✖{RESET} {msg}\n").unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::Warned => {
-                        write!(w, "\r{}{}⚠{} {}\n", CLEAR_LINE, YELLOW, RESET, line.message)
-                            .unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::WarnedWith(msg) => {
-                        write!(w, "\r{CLEAR_LINE}{YELLOW}⚠{RESET} {msg}\n").unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::Informed => {
-                        write!(w, "\r{}{}ℹ{} {}\n", CLEAR_LINE, BLUE, RESET, line.message).unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::InformedWith(msg) => {
-                        write!(w, "\r{CLEAR_LINE}{BLUE}ℹ{RESET} {msg}\n").unwrap();
-                        visible_count += 1;
-                    }
-                    LineStatus::Cleared => { /* skip — no output */ }
+            for line in snapshot.as_slice() {
+                macro_rules! match_tree {
+                    ($($pat:pat => ($symbol:expr, $msg:expr)),* $(,)?) => {
+                        match &line.status {
+                            LineStatus::Active => {
+                                write!(w, "\r{}{} {}\n", CLEAR_LINE, frame_char, line.message).unwrap();
+                                visible_count += 1;
+                            }
+                            $(
+                                $pat => {
+                                    write!(w, "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {msg}\n",
+                                        symbol = $symbol.symbol(),
+                                        ascii_color = $symbol.color().as_deref().unwrap_or(""),
+                                        msg = $msg
+                                    ).unwrap();
+                                    visible_count += 1;
+                                }
+                            ),*,
+                            LineStatus::Cleared => { /* skip — no output */ }
+                        }
+                    };
+                }
+
+                match_tree! {
+                    LineStatus::Succeeded(symbol) => (symbol, line.message),
+                    LineStatus::SucceededWith(symbol, msg) => (symbol, msg),
+                    LineStatus::Failed(symbol) => (symbol, line.message),
+                    LineStatus::FailedWith(symbol, msg) => (symbol, msg),
+                    LineStatus::Warned(symbol) => (symbol, line.message),
+                    LineStatus::WarnedWith(symbol, msg) => (symbol, msg),
+                    LineStatus::Informed(symbol) => (symbol, line.message),
+                    LineStatus::InformedWith(symbol, msg) => (symbol, msg),
                 }
             }
 
@@ -509,6 +520,7 @@ fn multi_spin_loop(
 mod tests {
     use super::*;
     use crate::shared::tests::TestWriter;
+    use crate::symbol::AsciiColor;
     use proptest::prelude::*;
 
     fn _assert_send() {
@@ -524,7 +536,7 @@ mod tests {
         let handle = MultiSpinner::with_writer_tty(writer, true).start();
         let line = handle.add("Compiling crate");
         thread::sleep(Duration::from_millis(200));
-        line.success();
+        line.success(("✔", AsciiColor::Green));
         thread::sleep(Duration::from_millis(100));
         handle.stop();
 
@@ -538,7 +550,7 @@ mod tests {
         );
         // Verify green ✔ for success
         assert!(
-            output.contains(GREEN),
+            output.contains(&AsciiColor::Green.to_ansi_code()),
             "TTY output must contain GREEN ANSI code"
         );
         assert!(output.contains("✔"), "TTY output must contain ✔");
@@ -564,12 +576,12 @@ mod tests {
         // Add spinner A and finalize it
         let line_a = handle.add("Task A");
         thread::sleep(Duration::from_millis(200));
-        line_a.success();
+        line_a.success(("✔", AsciiColor::Green));
 
         // Add spinner B after A is finalized
         let line_b = handle.add("Task B");
         thread::sleep(Duration::from_millis(200));
-        line_b.fail();
+        line_b.fail(("✖", AsciiColor::Red));
 
         thread::sleep(Duration::from_millis(100));
         handle.stop();
@@ -599,8 +611,8 @@ mod tests {
         let a = handle.add("Alpha");
         let b = handle.add("Beta");
         thread::sleep(Duration::from_millis(150));
-        a.success_with("Alpha done.");
-        b.fail_with("Beta failed.");
+        a.success_with("Alpha done.", ("✔", AsciiColor::Green));
+        b.fail_with("Beta failed.", ("✖", AsciiColor::Red));
         thread::sleep(Duration::from_millis(100));
         handle.stop();
         let len_stop = buf_stop.lock().unwrap().len();
@@ -612,8 +624,8 @@ mod tests {
         let a = handle.add("Alpha");
         let b = handle.add("Beta");
         thread::sleep(Duration::from_millis(150));
-        a.success_with("Alpha done.");
-        b.fail_with("Beta failed.");
+        a.success_with("Alpha done.", ("✔", AsciiColor::Green));
+        b.fail_with("Beta failed.", ("✖", AsciiColor::Red));
         thread::sleep(Duration::from_millis(100));
         drop(handle);
         let len_drop = buf_drop.lock().unwrap().len();
@@ -642,7 +654,7 @@ mod tests {
 
         // Move the SpinnerLineHandle to another thread and finalize it there
         let t = thread::spawn(move || {
-            line_handle.success();
+            line_handle.success(("✔", AsciiColor::Green));
         });
         t.join().expect("thread must not panic");
 
@@ -663,13 +675,13 @@ mod tests {
         // Move each handle to a different thread and finalize concurrently
         let threads: Vec<thread::JoinHandle<()>> = vec![
             thread::spawn(move || {
-                h1.success();
+                h1.success(("✔", AsciiColor::Green));
             }),
             thread::spawn(move || {
-                h2.fail();
+                h2.fail(("✖", AsciiColor::Red));
             }),
             thread::spawn(move || {
-                h3.success_with("gamma done");
+                h3.success_with("gamma done", ("✔", AsciiColor::Green));
             }),
         ];
 
@@ -711,9 +723,9 @@ mod tests {
         // Let the render loop run a few frames
         thread::sleep(Duration::from_millis(200));
 
-        line1.success();
+        line1.success(("✔", AsciiColor::Green));
         line2.clear();
-        line3.fail();
+        line3.fail(("✖", AsciiColor::Red));
 
         // Let the render loop pick up finalized statuses
         thread::sleep(Duration::from_millis(100));
@@ -844,7 +856,7 @@ mod tests {
             let lines = handle.lines.lock().unwrap();
             prop_assert_eq!(lines.len(), 1, "line count must be 1 after a single add()");
             prop_assert_eq!(lines[0].message.clone(), msg, "stored message must match the input");
-            prop_assert_eq!(lines[0].status.clone(), LineStatus::Active, "new line must be Active");
+            prop_assert_eq!(&lines[0].status, &LineStatus::Active, "new line must be Active");
 
             drop(line_handle);
         }
@@ -880,7 +892,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(msg.clone());
-            line_handle.success();
+            line_handle.success(("✔", AsciiColor::Green));
 
             let output = reader.output();
             let expected = format!("✔ {}\n", msg);
@@ -896,7 +908,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(original);
-            line_handle.success_with(replacement.clone());
+            line_handle.success_with(replacement.clone(), ("✔", AsciiColor::Green));
 
             let output = reader.output();
             let expected = format!("✔ {}\n", replacement);
@@ -912,7 +924,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(msg.clone());
-            line_handle.fail();
+            line_handle.fail(("✖", AsciiColor::Red));
 
             let output = reader.output();
             let expected = format!("✖ {}\n", msg);
@@ -928,7 +940,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(original);
-            line_handle.fail_with(replacement.clone());
+            line_handle.fail_with(replacement.clone(), ("✖", AsciiColor::Red));
 
             let output = reader.output();
             let expected = format!("✖ {}\n", replacement);
@@ -953,7 +965,7 @@ mod tests {
             // Finalize in reverse order to prove output follows finalization order, not add order
             let reversed_messages: Vec<String> = messages.iter().rev().cloned().collect();
             for line_handle in handles.into_iter().rev() {
-                line_handle.success();
+                line_handle.success(("✔", AsciiColor::Green));
             }
 
             let output = reader.output();
@@ -999,7 +1011,7 @@ mod tests {
                 .into_iter()
                 .map(|lh| {
                     thread::spawn(move || {
-                        lh.success();
+                        lh.success(("✔", AsciiColor::Green));
                     })
                 })
                 .collect();
@@ -1044,8 +1056,8 @@ mod tests {
 
             let lines = handle.lines.lock().unwrap();
             prop_assert_eq!(
-                lines[0].status.clone(),
-                LineStatus::Cleared,
+                &lines[0].status,
+                &LineStatus::Cleared,
                 "clear() must set status to Cleared"
             );
         }
@@ -1075,7 +1087,7 @@ mod tests {
                 if should_clear {
                     lh.clear();
                 } else {
-                    lh.success();
+                    lh.success(("✔", AsciiColor::Green));
                 }
             }
 
@@ -1108,7 +1120,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(msg.clone());
-            line_handle.warn();
+            line_handle.warn(("⚠", AsciiColor::Yellow));
 
             let output = reader.output();
             let expected = format!("⚠ {}\n", msg);
@@ -1124,7 +1136,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(original);
-            line_handle.warn_with(replacement.clone());
+            line_handle.warn_with(replacement.clone(), ("⚠", AsciiColor::Yellow));
 
             let output = reader.output();
             let expected = format!("⚠ {}\n", replacement);
@@ -1140,7 +1152,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(msg.clone());
-            line_handle.info();
+            line_handle.info(("ℹ", AsciiColor::Blue));
 
             let output = reader.output();
             let expected = format!("ℹ {}\n", msg);
@@ -1156,7 +1168,7 @@ mod tests {
 
             let handle = MultiSpinner::with_writer(writer).start();
             let line_handle = handle.add(original);
-            line_handle.info_with(replacement.clone());
+            line_handle.info_with(replacement.clone(), ("ℹ", AsciiColor::Blue));
 
             let output = reader.output();
             let expected = format!("ℹ {}\n", replacement);
@@ -1187,8 +1199,8 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
 
             // Finalize: one success, one fail
-            line1.success();
-            line2.fail();
+            line1.success(("✔", AsciiColor::Green));
+            line2.fail(("✖", AsciiColor::Red));
 
             // Sleep briefly to let the render loop pick up the finalized state
             thread::sleep(Duration::from_millis(100));
@@ -1225,11 +1237,11 @@ mod tests {
             prop_assert!(has_braille, "TTY multi-spinner output must contain braille animation frame characters");
 
             // Verify green ✔ with ANSI color codes for success-finalized lines
-            prop_assert!(output.contains(GREEN), "TTY multi-spinner output must contain GREEN ANSI code for success");
+            prop_assert!(output.contains(&AsciiColor::Green.to_ansi_code()), "TTY multi-spinner output must contain GREEN ANSI code for success");
             prop_assert!(output.contains("✔"), "TTY multi-spinner output must contain ✔ for success");
 
             // Verify red ✖ with ANSI color codes for fail-finalized lines
-            prop_assert!(output.contains(RED), "TTY multi-spinner output must contain RED ANSI code for failure");
+            prop_assert!(output.contains(&AsciiColor::Red.to_ansi_code()), "TTY multi-spinner output must contain RED ANSI code for failure");
             prop_assert!(output.contains("✖"), "TTY multi-spinner output must contain ✖ for failure");
 
             // Verify messages are present in the output
@@ -1266,7 +1278,7 @@ mod tests {
                 if should_clear {
                     lh.clear();
                 } else {
-                    lh.success();
+                    lh.success(("✔", AsciiColor::Green));
                 }
             }
 
@@ -1356,7 +1368,7 @@ mod tests {
                 if should_clear {
                     lh.clear();
                 } else {
-                    lh.success();
+                    lh.success(("✔", AsciiColor::Green));
                 }
             }
 
@@ -1475,7 +1487,7 @@ mod tests {
                 if should_clear {
                     lh.clear();
                 } else {
-                    lh.success();
+                    lh.success(("✔", AsciiColor::Green));
                 }
             }
 
@@ -1548,7 +1560,7 @@ mod tests {
                 if should_clear {
                     lh.clear();
                 } else {
-                    lh.success();
+                    lh.success(("✔", AsciiColor::Green));
                 }
             }
 
@@ -1704,10 +1716,10 @@ mod tests {
             // 0 = success, 1 = fail, 2 = success_with, 3 = fail_with
             for (lh, &pattern) in handles.into_iter().zip(finalize_pattern.iter()) {
                 match pattern % 4 {
-                    0 => lh.success(),
-                    1 => lh.fail(),
-                    2 => lh.success_with("custom-success"),
-                    3 => lh.fail_with("custom-fail"),
+                    0 => lh.success(("✔", AsciiColor::Green)),
+                    1 => lh.fail(("✖", AsciiColor::Red)),
+                    2 => lh.success_with("custom-success", ("✔", AsciiColor::Green)),
+                    3 => lh.fail_with("custom-fail", ("✖", AsciiColor::Red)),
                     _ => unreachable!(),
                 }
             }
@@ -1774,10 +1786,10 @@ mod tests {
             let patterns: Vec<u8> = finalize_pattern[..count].to_vec();
             for (lh, &pattern) in handles.into_iter().zip(patterns.iter()) {
                 match pattern % 4 {
-                    0 => lh.success(),
-                    1 => lh.fail(),
-                    2 => lh.success_with(format!("custom-{}", "ok")),
-                    3 => lh.fail_with(format!("custom-{}", "err")),
+                    0 => lh.success(("✔", AsciiColor::Green)),
+                    1 => lh.fail(("✖", AsciiColor::Red)),
+                    2 => lh.success_with(format!("custom-{}", "ok"), ("✔", AsciiColor::Green)),
+                    3 => lh.fail_with(format!("custom-{}", "err"), ("✖", AsciiColor::Red)),
                     _ => unreachable!(),
                 }
             }
@@ -1874,10 +1886,10 @@ mod tests {
 
         thread::sleep(Duration::from_millis(200));
 
-        warn_line.warn();
-        warn_with_line.warn_with("warned result");
-        info_line.info();
-        info_with_line.info_with("informed result");
+        warn_line.warn(("⚠", AsciiColor::Yellow));
+        warn_with_line.warn_with("warned result", ("⚠", AsciiColor::Yellow));
+        info_line.info(("ℹ", AsciiColor::Blue));
+        info_with_line.info_with("informed result", ("ℹ", AsciiColor::Blue));
 
         thread::sleep(Duration::from_millis(100));
         handle.stop();
@@ -1886,14 +1898,14 @@ mod tests {
 
         // Warn color and symbol
         assert!(
-            output.contains(YELLOW),
+            output.contains(&AsciiColor::Yellow.to_ansi_code()),
             "TTY output must contain YELLOW ANSI code"
         );
         assert!(output.contains("⚠"), "TTY output must contain ⚠");
 
         // Info color and symbol
         assert!(
-            output.contains(BLUE),
+            output.contains(&AsciiColor::Blue.to_ansi_code()),
             "TTY output must contain BLUE ANSI code"
         );
         assert!(output.contains("ℹ"), "TTY output must contain ℹ");
