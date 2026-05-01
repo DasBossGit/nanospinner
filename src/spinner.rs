@@ -296,16 +296,20 @@ impl<State: Send> SpinnerHandle<State> {
         }
 
         match &mut *self.message.lock().unwrap() {
-            UpdateStrategy::Message(msg) => self.tick_with(msg),
-            UpdateStrategy::Callback { state, callback } => self.tick_with(&callback(state)),
+            UpdateStrategy::Message(msg) => self.tick_with_unchecked(msg),
+            UpdateStrategy::Callback { state, callback } => self.tick_with_unchecked(&callback(state)),
         };
     }
 
     pub fn tick_with(&self, message: impl AsRef<str>) {
         if self.thread.try_lock().map(|t| t.is_some()).unwrap_or(false) {
-            // If the thread is still running, we can just return and let it update the frame on the next tick.
+            *self.message.lock().unwrap() = UpdateStrategy::Message(message.as_ref().to_string());
             return;
         }
+        self.tick_with_unchecked(message.as_ref());
+    }
+
+    fn tick_with_unchecked(&self, message: &str) {
         let idx = self.last_frame.load(Ordering::Acquire);
         let frame = self.frames[idx % self.frames.len()];
         self.last_frame
