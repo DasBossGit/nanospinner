@@ -295,17 +295,22 @@ impl<State: Send> SpinnerHandle<State> {
             return;
         }
 
-        let mut msg = self.message.lock().unwrap();
+        match &mut *self.message.lock().unwrap() {
+            UpdateStrategy::Message(msg) => self.tick_with(msg),
+            UpdateStrategy::Callback { state, callback } => self.tick_with(&callback(state)),
+        };
+    }
 
+    pub fn tick_with(&self, message: impl AsRef<str>) {
+        if self.thread.try_lock().map(|t| t.is_some()).unwrap_or(false) {
+            // If the thread is still running, we can just return and let it update the frame on the next tick.
+            return;
+        }
         let idx = self.last_frame.load(Ordering::Acquire);
         let frame = self.frames[idx % self.frames.len()];
         self.last_frame
             .store((idx + 1) % self.frames.len(), Ordering::Release);
-
-        let output = match &mut *msg {
-            UpdateStrategy::Message(msg) => format_frame(frame, msg),
-            UpdateStrategy::Callback { state, callback } => format_frame(frame, &callback(state)),
-        };
+        let output = format_frame(frame, message.as_ref());
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
