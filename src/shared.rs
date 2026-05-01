@@ -20,6 +20,10 @@ pub(crate) fn format_finalize(symbol: impl Symbol, message: &str) -> String {
     )
 }
 
+pub fn clear_line() -> String {
+    format!("\r{CLEAR_LINE}")
+}
+
 pub(crate) fn format_finalize_plain(symbol: impl AsRef<str>, message: &str) -> String {
     format!("{symbol} {message}\n", symbol = symbol.as_ref())
 }

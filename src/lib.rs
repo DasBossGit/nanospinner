@@ -141,10 +141,10 @@
 mod multi;
 mod shared;
 mod spinner;
-mod update;
 mod symbol;
-
-pub use symbol::{AsciiColor, Symbol, Symbols};
+mod update;
 
 pub use multi::{MultiSpinner, MultiSpinnerHandle, SpinnerLineHandle};
+pub use shared::clear_line;
 pub use spinner::{Spinner, SpinnerHandle};
+pub use symbol::{AsciiColor, Symbol, Symbols};
