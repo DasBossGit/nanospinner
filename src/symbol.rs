@@ -31,6 +31,23 @@ pub enum Symbols {
     Info = 'ℹ' as u32,
 }
 
+impl Symbol for Symbols {
+    fn symbol(&self) -> &str {
+        match self {
+            Symbols::Success => "✔",
+            Symbols::Warn => "⚠",
+            Symbols::Fail => "✖",
+            Symbols::Info => "ℹ",
+        }
+    }
+}
+
+impl AsRef<str> for Symbols {
+    fn as_ref(&self) -> &str {
+        self.symbol()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum AsciiColor {

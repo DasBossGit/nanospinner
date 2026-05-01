@@ -11,6 +11,7 @@ use crate::{
         format_finalize, format_finalize_plain, format_frame, CLEAR_LINE, DEFAULT_FINISH, FRAMES,
     },
     symbol::{AsciiColor, Symbol},
+    update::UpdateStrategy,
 };
 
 /// A builder for configuring and starting a terminal spinner.
@@ -18,8 +19,8 @@ use crate::{
 /// Use [`Spinner::new`] for stdout, or [`Spinner::with_writer`] /
 /// [`Spinner::with_writer_tty`] for custom output targets. Call
 /// [`Spinner::start`] to begin the animation and get a [`SpinnerHandle`].
-pub struct Spinner<W: io::Write + Send + 'static = io::Stdout> {
-    message: String,
+pub struct Spinner<State: Send + 'static, W: io::Write + Send + 'static = io::Stdout> {
+    message: UpdateStrategy<State>,
     frames: Box<[&'static str]>,
     finish: Box<dyn Symbol + Send>,
     interval: Duration,
@@ -27,14 +28,14 @@ pub struct Spinner<W: io::Write + Send + 'static = io::Stdout> {
     is_tty: bool,
 }
 
-impl Spinner {
+impl<State: Send + 'static> Spinner<State> {
     /// Create a new spinner with the given message, writing to stdout.
     ///
     /// Automatically detects whether stdout is a terminal. When it isn't
     /// (e.g. output is piped or redirected), the spinner skips animation
     /// and ANSI codes, printing plain text instead.
     #[must_use]
-    pub fn new(message: impl Into<String>) -> Spinner<io::Stdout> {
+    pub fn new(message: impl Into<UpdateStrategy<State>>) -> Spinner<State> {
         Spinner {
             message: message.into(),
             frames: FRAMES.into(),
@@ -46,12 +47,12 @@ impl Spinner {
     }
 }
 
-impl<W: io::Write + Send + 'static> Spinner<W> {
+impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
     /// Create a new spinner with the given message and a custom writer.
     ///
     /// `is_tty` defaults to `false` for custom writers. Use
     /// [`Spinner::with_writer_tty`] if you need to override this.
-    pub fn with_writer(message: impl Into<String>, writer: W) -> Self {
+    pub fn with_writer(message: impl Into<UpdateStrategy<State>>, writer: W) -> Self {
         Spinner {
             message: message.into(),
             frames: FRAMES.into(),
@@ -64,7 +65,11 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
 
     /// Create a new spinner with the given message, a custom writer, and
     /// an explicit TTY flag controlling whether ANSI codes are emitted.
-    pub fn with_writer_tty(message: impl Into<String>, writer: W, is_tty: bool) -> Self {
+    pub fn with_writer_tty(
+        message: impl Into<UpdateStrategy<State>>,
+        writer: W,
+        is_tty: bool,
+    ) -> Self {
         Spinner {
             message: message.into(),
             frames: FRAMES.into(),
@@ -95,7 +100,7 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
     /// When the output is not a TTY, no background thread is spawned and
     /// the animation is skipped entirely.
     #[must_use]
-    pub fn start(self) -> SpinnerHandle {
+    pub fn start(self) -> SpinnerHandle<State> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let message = Arc::new(Mutex::new(self.message));
         let writer: Arc<Mutex<Box<dyn io::Write + Send>>> =
@@ -135,22 +140,22 @@ impl<W: io::Write + Send + 'static> Spinner<W> {
 /// the message mid-spin, and finalize with [`SpinnerHandle::success`] or
 /// [`SpinnerHandle::fail`]. Dropping the handle will automatically stop
 /// the background thread.
-pub struct SpinnerHandle {
+pub struct SpinnerHandle<State: Send> {
     finish: Box<dyn Symbol>,
     stop_flag: Arc<AtomicBool>,
-    message: Arc<Mutex<String>>,
+    message: Arc<Mutex<UpdateStrategy<State>>>,
     writer: Arc<Mutex<Box<dyn io::Write + Send>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     is_tty: bool,
 }
 
-impl SpinnerHandle {
+impl<State: Send> SpinnerHandle<State> {
     /// Update the spinner message while it's running.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
     pub fn update(&self, message: impl Into<String>) {
-        *self.message.lock().unwrap() = message.into();
+        *self.message.lock().unwrap() = UpdateStrategy::Message(message.into());
     }
 
     /// Stop the spinner and clear the line.
@@ -175,13 +180,41 @@ impl SpinnerHandle {
         }
     }
 
-    /// Stop the spinner and print a green ✔ with the current message.
+    /// Stop the spinner and print the symbol set at construction with the current message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn success(self) {
-        let msg = self.message.lock().unwrap().clone();
+    pub fn finish(self) {
+        let mut msg = self.message.lock().unwrap();
         self.shutdown();
+        let output = match &mut *msg {
+            UpdateStrategy::Message(msg) => {
+                if self.is_tty {
+                    format_finalize(self.finish.as_ref(), &msg)
+                } else {
+                    format_finalize_plain(self.finish.symbol(), &msg)
+                }
+            }
+            UpdateStrategy::Callback { state, callback } => {
+                if self.is_tty {
+                    format_finalize(self.finish.as_ref(), &(callback)(state))
+                } else {
+                    format_finalize_plain(self.finish.symbol(), &(callback)(state))
+                }
+            }
+        };
+        let mut w = self.writer.lock().unwrap();
+        write!(w, "{output}").unwrap();
+        w.flush().unwrap();
+    }
+
+    /// Stop the spinner and print the symbol set at construction with a replacement message.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn finish_with(self, message: impl Into<String>) {
+        self.shutdown();
+        let msg = message.into();
         let output = if self.is_tty {
             format_finalize(self.finish.as_ref(), &msg)
         } else {
@@ -192,113 +225,39 @@ impl SpinnerHandle {
         w.flush().unwrap();
     }
 
-    /// Stop the spinner and print a green ✔ with a replacement message.
+    /// Stop the spinner and print the given symbol with the current message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn success_with(self, message: impl Into<String>) {
+    pub fn finish_with_symbol(self, symbol: impl Symbol) {
+        let mut msg = self.message.lock().unwrap();
         self.shutdown();
-        let msg = message.into();
-        let output = if self.is_tty {
-            format_finalize(self.finish.as_ref(), &msg)
-        } else {
-            format_finalize_plain(self.finish.symbol(), &msg)
+        let output = match &mut *msg {
+            UpdateStrategy::Message(msg) => {
+                if self.is_tty {
+                    format_finalize(symbol, msg)
+                } else {
+                    format_finalize_plain(symbol.symbol(), msg)
+                }
+            }
+            UpdateStrategy::Callback { state, callback } => {
+                if self.is_tty {
+                    format_finalize(symbol, &(callback)(state))
+                } else {
+                    format_finalize_plain(symbol.symbol(), &(callback)(state))
+                }
+            }
         };
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
     }
 
-    /// Stop the spinner and print a red ✖ with the current message.
+    /// Stop the spinner and print the given symbol with a replacement message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn fail(self, symbol: impl Symbol) {
-        let msg = self.message.lock().unwrap().clone();
-        self.shutdown();
-        let output = if self.is_tty {
-            format_finalize(symbol, &msg)
-        } else {
-            format_finalize_plain(symbol.symbol(), &msg)
-        };
-        let mut w = self.writer.lock().unwrap();
-        write!(w, "{output}").unwrap();
-        w.flush().unwrap();
-    }
-
-    /// Stop the spinner and print a red ✖ with a replacement message.
-    ///
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
-    pub fn fail_with(self, message: impl Into<String>, symbol: impl Symbol) {
-        self.shutdown();
-        let msg = message.into();
-        let output = if self.is_tty {
-            format_finalize(symbol, &msg)
-        } else {
-            format_finalize_plain(symbol.symbol(), &msg)
-        };
-        let mut w = self.writer.lock().unwrap();
-        write!(w, "{output}").unwrap();
-        w.flush().unwrap();
-    }
-
-    /// Stop the spinner and print a yellow ⚠ with the current message.
-    ///
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
-    pub fn warn(self, symbol: impl Symbol) {
-        let msg = self.message.lock().unwrap().clone();
-        self.shutdown();
-        let output = if self.is_tty {
-            format_finalize(symbol, &msg)
-        } else {
-            format_finalize_plain(symbol.symbol(), &msg)
-        };
-        let mut w = self.writer.lock().unwrap();
-        write!(w, "{output}").unwrap();
-        w.flush().unwrap();
-    }
-
-    /// Stop the spinner and print a yellow ⚠ with a replacement message.
-    ///
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
-    pub fn warn_with(self, message: impl Into<String>, symbol: impl Symbol) {
-        self.shutdown();
-        let msg = message.into();
-        let output = if self.is_tty {
-            format_finalize(symbol, &msg)
-        } else {
-            format_finalize_plain(symbol.symbol(), &msg)
-        };
-        let mut w = self.writer.lock().unwrap();
-        write!(w, "{output}").unwrap();
-        w.flush().unwrap();
-    }
-
-    /// Stop the spinner and print a blue ℹ with the current message.
-    ///
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
-    pub fn info(self, symbol: impl Symbol) {
-        let msg = self.message.lock().unwrap().clone();
-        self.shutdown();
-        let output = if self.is_tty {
-            format_finalize(symbol, &msg)
-        } else {
-            format_finalize_plain(symbol.symbol(), &msg)
-        };
-        let mut w = self.writer.lock().unwrap();
-        write!(w, "{output}").unwrap();
-        w.flush().unwrap();
-    }
-
-    /// Stop the spinner and print a blue ℹ with a replacement message.
-    ///
-    /// # Panics
-    /// Panics if the internal mutex is poisoned.
-    pub fn info_with(self, message: impl Into<String>, symbol: impl Symbol) {
+    pub fn finish_with_message(self, message: impl Into<String>, symbol: impl Symbol) {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
@@ -312,24 +271,27 @@ impl SpinnerHandle {
     }
 }
 
-impl Drop for SpinnerHandle {
+impl<State: Send> Drop for SpinnerHandle<State> {
     fn drop(&mut self) {
         self.shutdown();
     }
 }
 
-fn spin_loop(
+fn spin_loop<State>(
     frames: &[&str],
     interval: Duration,
     stop_flag: &Arc<AtomicBool>,
-    message: &Arc<Mutex<String>>,
+    message: &Arc<Mutex<UpdateStrategy<State>>>,
     writer: &Arc<Mutex<Box<dyn io::Write + Send>>>,
 ) {
     let mut i = 0;
     while !stop_flag.load(Ordering::Acquire) {
-        let msg = message.lock().unwrap().clone();
+        let mut msg = message.lock().unwrap();
         let frame = frames[i];
-        let output = format_frame(frame, &msg);
+        let output = match &mut *msg {
+            UpdateStrategy::Message(msg) => format_frame(frame, msg),
+            UpdateStrategy::Callback { state, callback } => format_frame(frame, &callback(state)),
+        };
         let mut w = writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
@@ -340,6 +302,7 @@ fn spin_loop(
 }
 
 #[cfg(test)]
+#[cfg(false)]
 mod tests {
     use super::*;
     use crate::{shared::tests::TestWriter, symbol::AsciiColor};

@@ -8,6 +8,7 @@
 //!
 //! Run with: cargo run --example custom_writer
 
+use ::nanospinner::Symbols;
 use nanospinner::{MultiSpinner, Spinner};
 use std::io;
 use std::thread;
@@ -30,9 +31,12 @@ fn main() {
 
     thread::sleep(Duration::from_secs(2));
     lint.clear();
-    build.success();
+    build.success(Symbols::Success);
     thread::sleep(Duration::from_secs(1));
-    test.success_with("42 tests passed.");
+    test.success_with("42 tests passed.", Symbols::Success);
 
     handle.stop();
 }
+
+
+todo update message with fn
