@@ -1,3 +1,4 @@
+use ::std::sync::atomic::AtomicUsize;
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,7 +24,7 @@ pub struct Spinner<State: Send + 'static, W: io::Write + Send + 'static = io::St
     message: UpdateStrategy<State>,
     frames: Box<[&'static str]>,
     finish: Box<dyn Symbol + Send>,
-    interval: Duration,
+    interval: Option<Duration>,
     writer: W,
     is_tty: bool,
 }
@@ -40,7 +41,7 @@ impl<State: Send + 'static> Spinner<State> {
             message: message.into(),
             frames: FRAMES.into(),
             finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
-            interval: Duration::from_millis(80),
+            interval: None,
             is_tty: io::stdout().is_terminal(),
             writer: io::stdout(),
         }
@@ -57,7 +58,7 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
             message: message.into(),
             frames: FRAMES.into(),
             finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
-            interval: Duration::from_millis(80),
+            interval: None,
             is_tty: false,
             writer,
         }
@@ -74,12 +75,13 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
             message: message.into(),
             frames: FRAMES.into(),
             finish: Box::new((DEFAULT_FINISH, AsciiColor::Green)),
-            interval: Duration::from_millis(80),
+            interval: None,
             is_tty,
             writer,
         }
     }
 
+    /// Override the default spinner frames, finish symbol, and/or interval.
     pub fn with_frames(
         mut self,
         frames: impl IntoIterator<Item = &'static str>,
@@ -90,8 +92,11 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
         self
     }
 
+    /// Set a update interval for the spinner animation. When `None` (the default), the spinner
+    /// will not animate and will instead print the first frame as a static symbol - needs
+    /// to be updated manually afterwards using `update()`.
     pub fn with_interval(mut self, interval: Duration) -> Self {
-        self.interval = interval;
+        self.interval = Some(interval);
         self
     }
 
@@ -106,16 +111,25 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
         let writer: Arc<Mutex<Box<dyn io::Write + Send>>> =
             Arc::new(Mutex::new(Box::new(self.writer)));
         let is_tty = self.is_tty;
+        let last_frame = Arc::new(AtomicUsize::new(0));
 
-        let thread = if is_tty {
+        let thread = if is_tty && self.interval.is_some() {
             let t_frames = self.frames.clone();
-            let t_interval = self.interval;
+            let t_interval = self.interval.unwrap_or(Duration::from_millis(80));
             let t_stop = Arc::clone(&stop_flag);
             let t_msg = Arc::clone(&message);
             let t_writer = Arc::clone(&writer);
+            let t_last_frame = Arc::clone(&last_frame);
 
             Some(thread::spawn(move || {
-                spin_loop(&t_frames, t_interval, &t_stop, &t_msg, &t_writer);
+                spin_loop(
+                    &t_frames,
+                    t_interval,
+                    &t_stop,
+                    &t_msg,
+                    &t_writer,
+                    t_last_frame,
+                )
             }))
         } else {
             // Mark as already stopped so drop() is a no-op.
@@ -130,6 +144,8 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
             writer,
             thread: Mutex::new(thread),
             is_tty,
+            frames: self.frames,
+            last_frame,
         }
     }
 }
@@ -147,6 +163,8 @@ pub struct SpinnerHandle<State: Send> {
     writer: Arc<Mutex<Box<dyn io::Write + Send>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     is_tty: bool,
+    frames: Box<[&'static str]>,
+    last_frame: Arc<AtomicUsize>,
 }
 
 impl<State: Send> SpinnerHandle<State> {
@@ -269,6 +287,30 @@ impl<State: Send> SpinnerHandle<State> {
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
     }
+
+    /// Tick the spinner to update the frame immediately.
+    pub fn tick(&self) {
+        if self.thread.try_lock().map(|t| t.is_some()).unwrap_or(false) {
+            // If the thread is still running, we can just return and let it update the frame on the next tick.
+            return;
+        }
+
+        let mut msg = self.message.lock().unwrap();
+
+        let idx = self.last_frame.load(Ordering::Acquire);
+        let frame = self.frames[idx % self.frames.len()];
+        self.last_frame
+            .store((idx + 1) % self.frames.len(), Ordering::Release);
+
+        let output = match &mut *msg {
+            UpdateStrategy::Message(msg) => format_frame(frame, msg),
+            UpdateStrategy::Callback { state, callback } => format_frame(frame, &callback(state)),
+        };
+        let mut w = self.writer.lock().unwrap();
+        write!(w, "{output}").unwrap();
+        w.flush().unwrap();
+        drop(w);
+    }
 }
 
 impl<State: Send> Drop for SpinnerHandle<State> {
@@ -283,11 +325,13 @@ fn spin_loop<State>(
     stop_flag: &Arc<AtomicBool>,
     message: &Arc<Mutex<UpdateStrategy<State>>>,
     writer: &Arc<Mutex<Box<dyn io::Write + Send>>>,
+    last_frame: Arc<AtomicUsize>,
 ) {
-    let mut i = 0;
+    let mut frame_iter = frames.iter().enumerate().cycle();
     while !stop_flag.load(Ordering::Acquire) {
         let mut msg = message.lock().unwrap();
-        let frame = frames[i];
+        let (idx, frame) = frame_iter.next().unwrap();
+        last_frame.store(idx, Ordering::Release);
         let output = match &mut *msg {
             UpdateStrategy::Message(msg) => format_frame(frame, msg),
             UpdateStrategy::Callback { state, callback } => format_frame(frame, &callback(state)),
@@ -296,7 +340,6 @@ fn spin_loop<State>(
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
         drop(w);
-        i = (i + 1) % frames.len();
         thread::sleep(interval);
     }
 }
