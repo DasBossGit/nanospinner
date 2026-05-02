@@ -153,6 +153,16 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
 macro_rules! into_inner {
     ($self:expr) => {{
         let md = ManuallyDrop::new($self);
+        unsafe {
+            let _finish = std::ptr::read(&md.finish);
+            let _stop_flag = std::ptr::read(&md.stop_flag);
+            let _message = std::ptr::read(&md.message);
+            let _thread = std::ptr::read(&md.thread);
+            let _frames = std::ptr::read(&md.frames);
+            let _last_frame = std::ptr::read(&md.last_frame);
+            drop((_finish, _stop_flag, _message, _thread, _frames, _last_frame));
+        }
+
         let writer = Arc::try_unwrap(unsafe { ::std::ptr::read(&md.writer) })
             .ok()
             .and_then(|mutex| mutex.into_inner().ok())
