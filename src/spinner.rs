@@ -1,4 +1,4 @@
-use ::std::sync::atomic::AtomicUsize;
+use ::std::{mem::ManuallyDrop, sync::atomic::AtomicUsize};
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -150,6 +150,17 @@ impl<State: Send + 'static, W: io::Write + Send + 'static> Spinner<State, W> {
     }
 }
 
+macro_rules! into_inner {
+    ($self:expr) => {{
+        let md = ManuallyDrop::new($self);
+        let writer = Arc::try_unwrap(unsafe { ::std::ptr::read(&md.writer) })
+            .ok()
+            .and_then(|mutex| mutex.into_inner().ok())
+            .expect("Failed to unwrap writer Arc<Mutex>: multiple references exist");
+        ::std::mem::forget(md);
+        writer
+    }};
+}
 /// Handle for controlling a running spinner.
 ///
 /// Returned by [`Spinner::start`]. Use [`SpinnerHandle::update`] to change
@@ -202,7 +213,7 @@ impl<State: Send> SpinnerHandle<State> {
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn finish(self) {
+    pub fn finish(self) -> Box<dyn io::Write + Send> {
         let mut msg = self.message.lock().unwrap();
         self.shutdown();
         let output = match &mut *msg {
@@ -221,16 +232,20 @@ impl<State: Send> SpinnerHandle<State> {
                 }
             }
         };
+        drop(msg);
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
+        drop(w);
+
+        into_inner!(self)
     }
 
     /// Stop the spinner and print the symbol set at construction with a replacement message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn finish_with(self, message: impl Into<String>) {
+    pub fn finish_with(self, message: impl Into<String>) -> Box<dyn io::Write + Send> {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
@@ -241,13 +256,16 @@ impl<State: Send> SpinnerHandle<State> {
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
+        drop(w);
+
+        into_inner!(self)
     }
 
     /// Stop the spinner and print the given symbol with the current message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn finish_with_symbol(self, symbol: impl Symbol) {
+    pub fn finish_with_symbol(self, symbol: impl Symbol) -> Box<dyn io::Write + Send> {
         let mut msg = self.message.lock().unwrap();
         self.shutdown();
         let output = match &mut *msg {
@@ -266,16 +284,24 @@ impl<State: Send> SpinnerHandle<State> {
                 }
             }
         };
+        drop(msg);
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
+        drop(w);
+
+        into_inner!(self)
     }
 
     /// Stop the spinner and print the given symbol with a replacement message.
     ///
     /// # Panics
     /// Panics if the internal mutex is poisoned.
-    pub fn finish_with_message(self, message: impl Into<String>, symbol: impl Symbol) {
+    pub fn finish_with_message(
+        self,
+        message: impl Into<String>,
+        symbol: impl Symbol,
+    ) -> Box<dyn io::Write + Send> {
         self.shutdown();
         let msg = message.into();
         let output = if self.is_tty {
@@ -286,6 +312,9 @@ impl<State: Send> SpinnerHandle<State> {
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
         w.flush().unwrap();
+        drop(w);
+
+        into_inner!(self)
     }
 
     /// Tick the spinner to update the frame immediately.
@@ -297,7 +326,9 @@ impl<State: Send> SpinnerHandle<State> {
 
         match &mut *self.message.lock().unwrap() {
             UpdateStrategy::Message(msg) => self.tick_with_unchecked(msg),
-            UpdateStrategy::Callback { state, callback } => self.tick_with_unchecked(&callback(state)),
+            UpdateStrategy::Callback { state, callback } => {
+                self.tick_with_unchecked(&callback(state))
+            }
         };
     }
 
