@@ -8,24 +8,24 @@ pub(crate) const CLEAR_LINE: &str = "\x1b[2K";
 pub(crate) const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub(crate) const DEFAULT_FINISH: &str = "⠿";
 
+pub const fn clear_line() -> &'static str {
+    "\r\x1b[2K"
+}
+
 pub(crate) fn format_frame(frame_char: &str, message: &str) -> String {
     format!("\r{CLEAR_LINE}{frame_char} {message}")
 }
 
 pub(crate) fn format_finalize(symbol: impl Symbol, message: &str) -> String {
     format!(
-        "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {message}\n",
+        "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {message}",
         ascii_color = symbol.color().as_deref().unwrap_or(""),
         symbol = symbol.symbol()
     )
 }
 
-pub fn clear_line() -> String {
-    format!("\r{CLEAR_LINE}")
-}
-
 pub(crate) fn format_finalize_plain(symbol: impl AsRef<str>, message: &str) -> String {
-    format!("{symbol} {message}\n", symbol = symbol.as_ref())
+    format!("{symbol} {message}", symbol = symbol.as_ref())
 }
 
 #[cfg(test)]
