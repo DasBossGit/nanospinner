@@ -1,21 +1,21 @@
 [package]
-name = "nanospinner"
-version = "0.3.2"
-edition = "2021"
-description = "A minimal, zero-dependency terminal spinner for Rust CLI applications"
-license = "MIT"
-repository = "https://github.com/anthonysgro/nanospinner"
-keywords = ["spinner", "terminal", "cli", "progress", "tui"]
-categories = ["command-line-interface"]
-readme = "README.md"
-exclude = [
-    "proptest-regressions/",
-    ".github/",
-    "demo.gif",
-    "demo.tape"
-]
+    categories = ["command-line-interface"]
+    description = "A minimal, zero-dependency terminal spinner for Rust CLI applications"
+    edition = "2021"
+    exclude = [
+        ".github/",
+        "demo.gif",
+        "demo.tape",
+        "proptest-regressions/",
+    ]
+    keywords = ["cli", "progress", "spinner", "terminal", "tui"]
+    license = "MIT"
+    name = "nanospinner"
+    readme = "README.md"
+    repository = "https://github.com/anthonysgro/nanospinner"
+    version = "0.3.3"
 
 [dependencies]
 
 [dev-dependencies]
-proptest = "1"
+    proptest = "1"

@@ -22,7 +22,7 @@ use crate::{
 /// Use [`Spinner::new`] for stdout, or [`Spinner::with_writer`] /
 /// [`Spinner::with_writer_tty`] for custom output targets. Call
 /// [`Spinner::start`] to begin the animation and get a [`SpinnerHandle`].
-pub struct Spinner<State, Display, Frames, Finish, Writer = io::Stdout>
+pub struct Spinner<State, Display, Frames, Finish, Writer>
 where
     State: Send + 'static,
     Display: ::std::fmt::Display,
@@ -45,6 +45,7 @@ impl<State>
         &'static &'static str,
         <&'static [&'static str] as IntoIterator>::IntoIter,
         (&'static str, AsciiColor),
+        io::Stdout,
     >
 where
     State: Send + 'static,
