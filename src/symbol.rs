@@ -116,3 +116,13 @@ impl Symbol for Box<dyn Symbol + Send> {
         Symbol::color(self.as_ref())
     }
 }
+
+impl<S: Symbol> Symbol for &S {
+    fn symbol(&self) -> &str {
+        Symbol::symbol(*self)
+    }
+
+    fn color(&self) -> Option<String> {
+        Symbol::color(*self)
+    }
+}

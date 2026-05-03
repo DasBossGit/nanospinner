@@ -12,11 +12,14 @@ pub const fn clear_line() -> &'static str {
     "\r\x1b[2K"
 }
 
-pub(crate) fn format_frame(frame_char: &str, message: &str) -> String {
+pub(crate) fn format_frame(
+    frame_char: impl ::std::fmt::Display,
+    message: impl ::std::fmt::Display,
+) -> String {
     format!("\r{CLEAR_LINE}{frame_char} {message}")
 }
 
-pub(crate) fn format_finalize(symbol: impl Symbol, message: &str) -> String {
+pub(crate) fn format_finalize(symbol: impl Symbol, message: impl ::std::fmt::Display) -> String {
     format!(
         "\r{CLEAR_LINE}{ascii_color}{symbol}{RESET} {message}",
         ascii_color = symbol.color().as_deref().unwrap_or(""),
@@ -24,8 +27,11 @@ pub(crate) fn format_finalize(symbol: impl Symbol, message: &str) -> String {
     )
 }
 
-pub(crate) fn format_finalize_plain(symbol: impl AsRef<str>, message: &str) -> String {
-    format!("{symbol} {message}", symbol = symbol.as_ref())
+pub(crate) fn format_finalize_plain(
+    symbol: impl ::std::fmt::Display,
+    message: impl ::std::fmt::Display,
+) -> String {
+    format!("{symbol} {message}")
 }
 
 #[cfg(test)]

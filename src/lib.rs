@@ -143,6 +143,7 @@ mod shared;
 mod spinner;
 mod symbol;
 mod update;
+pub mod spinner_generic;
 
 pub use multi::{MultiSpinner, MultiSpinnerHandle, SpinnerLineHandle};
 pub use shared::clear_line;
