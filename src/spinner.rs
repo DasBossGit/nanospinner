@@ -351,10 +351,12 @@ impl<State: Send> SpinnerHandle<State> {
     }
 
     fn tick_with_unchecked(&self, message: &str) {
-        let idx = self.last_frame.load(Ordering::Acquire);
-        let frame = self.frames[idx % self.frames.len()];
-        self.last_frame
-            .store((idx + 1) % self.frames.len(), Ordering::Release);
+        let frame =
+            self.frames[self
+                .last_frame
+                .update(Ordering::Release, Ordering::Acquire, |idx| {
+                    (idx + 1) % self.frames.len()
+                })];
         let output = format_frame(frame, message);
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();

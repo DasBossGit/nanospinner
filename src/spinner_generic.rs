@@ -1,4 +1,4 @@
-use ::std::{mem::ManuallyDrop, sync::atomic::AtomicUsize};
+use ::std::{iter::Cycle, mem::ManuallyDrop, sync::atomic::AtomicUsize};
 use std::io::{self, IsTerminal};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -162,7 +162,7 @@ where
     /// When the output is not a TTY, no background thread is spawned and
     /// the animation is skipped entirely.
     #[must_use]
-    pub fn start(self) -> SpinnerHandle<State, Display, Frames::IntoIter, Finish, Writer> {
+    pub fn start(self) -> SpinnerHandle<State, Display, Finish, Writer> {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let message = Arc::new(Mutex::new(self.message));
         let writer: Arc<Mutex<Writer>> = Arc::new(Mutex::new(self.writer));
@@ -202,7 +202,7 @@ where
             writer,
             thread: Mutex::new(thread),
             is_tty,
-            frames: frames_iter,
+            frames: frames_iter.collect(),
             last_frame,
         }
     }
@@ -239,10 +239,9 @@ macro_rules! into_inner {
 /// the message mid-spin, and finalize with [`SpinnerHandle::success`] or
 /// [`SpinnerHandle::fail`]. Dropping the handle will automatically stop
 /// the background thread.
-pub struct SpinnerHandle<State, Display, Frames, Finish, Writer>
+pub struct SpinnerHandle<State, Display, Finish, Writer>
 where
     Display: ::std::fmt::Display,
-    Frames: Iterator<Item = Display> + Clone,
     Finish: Symbol,
     Writer: io::Write + 'static,
 {
@@ -252,14 +251,13 @@ where
     writer: Arc<Mutex<Writer>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     is_tty: bool,
-    frames: Frames,
+    frames: Vec<Display>,
     last_frame: Arc<AtomicUsize>,
 }
 
-impl<State, Display, Frames, Finish, Writer> SpinnerHandle<State, Display, Frames, Finish, Writer>
+impl<State, Display, Finish, Writer> SpinnerHandle<State, Display, Finish, Writer>
 where
     Display: ::std::fmt::Display,
-    Frames: Iterator<Item = Display> + Clone,
     Finish: Symbol,
     Writer: io::Write + 'static,
 {
@@ -421,11 +419,12 @@ where
     }
 
     fn tick_with_unchecked(&self, message: &str) {
-        let idx = self.last_frame.load(Ordering::Acquire);
-        let (idx, frame) = self.frames.clone().enumerate().skip(idx).next().expect(
-            "Last stored frame index is out of bounds for frames iterator - this is a logic bug",
-        );
-        self.last_frame.store(idx, Ordering::Release);
+        let frame =
+            &self.frames[self
+                .last_frame
+                .update(Ordering::Release, Ordering::Acquire, |idx| {
+                    (idx + 1) % self.frames.len()
+                })];
         let output = format_frame(frame, message);
         let mut w = self.writer.lock().unwrap();
         write!(w, "{output}").unwrap();
@@ -434,11 +433,9 @@ where
     }
 }
 
-impl<State, Display, Frames, Finish, Writer> Drop
-    for SpinnerHandle<State, Display, Frames, Finish, Writer>
+impl<State, Display, Finish, Writer> Drop for SpinnerHandle<State, Display, Finish, Writer>
 where
     Display: ::std::fmt::Display,
-    Frames: Iterator<Item = Display> + Clone,
     Finish: Symbol,
     Writer: io::Write + 'static,
 {
