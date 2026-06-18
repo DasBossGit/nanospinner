@@ -141,9 +141,11 @@
 mod multi;
 mod shared;
 mod spinner;
+pub mod spinner_generic;
+pub mod spinner_generic_manual;
+/* pub mod spinner_multi; */
 mod symbol;
 mod update;
-pub mod spinner_generic;
 
 pub use multi::{MultiSpinner, MultiSpinnerHandle, SpinnerLineHandle};
 pub use shared::clear_line;
