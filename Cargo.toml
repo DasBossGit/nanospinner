@@ -1,7 +1,7 @@
 [package]
     categories = ["command-line-interface"]
     description = "A minimal, zero-dependency terminal spinner for Rust CLI applications"
-    edition = "2021"
+    edition = "2024"
     exclude = [
         ".github/",
         "demo.gif",
